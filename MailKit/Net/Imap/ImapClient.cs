@@ -111,6 +111,7 @@ namespace MailKit.Net.Imap {
 		/// <value>The capabilities.</value>
 		public ImapCapabilities Capabilities {
 			get { return engine.Capabilities; }
+			set { engine.Capabilities = value; }
 		}
 
 		void CheckDisposed ()
@@ -286,10 +287,44 @@ namespace MailKit.Net.Imap {
 			if (credentials == null)
 				throw new ArgumentNullException ("credentials");
 
+
 			int capabilitiesVersion = engine.CapabilitiesVersion;
 			var uri = new Uri ("imap://" + host);
 			NetworkCredential cred;
 			ImapCommand ic;
+
+			if ((engine.Capabilities & ImapCapabilities.StartTLS) != 0) {
+				ic = engine.QueueCommand (cancellationToken, null, "STARTTLS\r\n");
+
+				engine.Wait (ic);
+
+				if (ic.Result == ImapCommandResult.Ok) {
+					var tls = new SslStream (engine.Stream, false, ValidateRemoteCertificate);
+					tls.AuthenticateAsClient (host, ClientCertificates, SslProtocols.Tls, true);
+					engine.Stream.Stream = tls;
+
+					// Query the CAPABILITIES again if the server did not include an
+					// untagged CAPABILITIES response to the STARTTLS command.
+					if (engine.CapabilitiesVersion == 1)
+						engine.QueryCapabilities (cancellationToken);
+				}
+			} else if ((engine.Capabilities & ImapCapabilities.Compress) != 0) {
+				ic = engine.QueueCommand (cancellationToken, null, "COMPRESS DEFLATE\r\n");
+
+				engine.Wait (ic);
+
+				if (ic.Result == ImapCommandResult.Ok) {
+					var unzip = new DeflateStream (engine.Stream, CompressionMode.Decompress);
+					var zip = new DeflateStream (engine.Stream, CompressionMode.Compress);
+
+					engine.Stream.Stream = new DuplexStream (unzip, zip);
+
+					// Query the CAPABILITIES again if the server did not include an
+					// untagged CAPABILITIES response to the COMPRESS command.
+					if (engine.CapabilitiesVersion == 1)
+						engine.QueryCapabilities (cancellationToken);
+				}
+			}
 
 			foreach (var authmech in SaslMechanism.AuthMechanismRank) {
 				if (!engine.AuthenticationMechanisms.Contains (authmech))
@@ -489,38 +524,11 @@ namespace MailKit.Net.Imap {
 			if (engine.CapabilitiesVersion == 0)
 				engine.QueryCapabilities (cancellationToken);
 
-			if (starttls && (engine.Capabilities & ImapCapabilities.StartTLS) != 0) {
-				var ic = engine.QueueCommand (cancellationToken, null, "STARTTLS\r\n");
+			if (!starttls)
+				engine.Capabilities &= ~ImapCapabilities.StartTLS;
 
-				engine.Wait (ic);
-
-				if (ic.Result == ImapCommandResult.Ok) {
-					var tls = new SslStream (stream, false, ValidateRemoteCertificate);
-					tls.AuthenticateAsClient (uri.Host, ClientCertificates, SslProtocols.Tls, true);
-					engine.Stream.Stream = tls;
-
-					// Query the CAPABILITIES again if the server did not include an
-					// untagged CAPABILITIES response to the STARTTLS command.
-					if (engine.CapabilitiesVersion == 1)
-						engine.QueryCapabilities (cancellationToken);
-				}
-			} else if (compress && (engine.Capabilities & ImapCapabilities.Compress) != 0) {
-				var ic = engine.QueueCommand (cancellationToken, null, "COMPRESS DEFLATE\r\n");
-
-				engine.Wait (ic);
-
-				if (ic.Result == ImapCommandResult.Ok) {
-					var unzip = new DeflateStream (stream, CompressionMode.Decompress);
-					var zip = new DeflateStream (stream, CompressionMode.Compress);
-
-					engine.Stream.Stream = new DuplexStream (unzip, zip);
-
-					// Query the CAPABILITIES again if the server did not include an
-					// untagged CAPABILITIES response to the COMPRESS command.
-					if (engine.CapabilitiesVersion == 1)
-						engine.QueryCapabilities (cancellationToken);
-				}
-			}
+			if (!compress)
+				engine.Capabilities &= ~ImapCapabilities.Compress;
 		}
 
 		/// <summary>
